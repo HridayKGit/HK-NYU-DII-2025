@@ -1,0 +1,174 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <RTClib.h>
+#include <FastLED.h>
+
+// — I²C LCD @0x27, 16×2 —
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+// — DS3231 RTC —
+RTC_DS3231 rtc;
+
+// — Single-button & alarm pin —
+const int buttonPin = 4;
+const int alarmPin  = 9;
+
+// — LED strip parameters —
+#define LED_PIN 6
+#define NUM_LEDS 30              // ← set this to your strip length
+CRGB leds[NUM_LEDS];
+
+// — Alarm time —
+int alarmHour   = 0;
+int alarmMinute = 0;
+
+// — Button timing/state —
+bool        lastState      = HIGH;
+unsigned long pressTime   = 0;
+unsigned long releaseTime = 0;
+const unsigned long longPressThreshold = 1000;  // 1 second
+
+// — Setting state: 0=view, 1=set hour, 2=set minute —
+int  setStage       = 0;
+bool alarmTriggered = false;
+
+void setup() {
+ Wire.begin();
+ rtc.begin();
+ if (rtc.lostPower()) {
+   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+ }
+
+ lcd.init();
+ lcd.backlight();
+
+ pinMode(buttonPin, INPUT_PULLUP);
+ pinMode(alarmPin,  OUTPUT);
+
+ // initialize LED strip
+ FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, NUM_LEDS);
+ FastLED.clear();
+ FastLED.show();
+
+ updateDisplay();
+}
+
+void loop() {
+ // — 1) update current clock on row 2 only on minute change —
+ static int lastMin = -1;
+ DateTime now = rtc.now();
+ if (now.minute() != lastMin) {
+   lcd.setCursor(0,1);
+   if (now.hour()   < 10) lcd.print('0');
+   lcd.print(now.hour());
+   lcd.print(':');
+   if (now.minute() < 10) lcd.print('0');
+   lcd.print(now.minute());
+   lcd.print("   ");
+   lastMin = now.minute();
+ }
+
+ // — 2) alarm check only in view mode —
+ if (setStage == 0) {
+   if (now.hour()==alarmHour && now.minute()==alarmMinute) {
+     if (!alarmTriggered) {
+       activateAlarm();
+       alarmTriggered = true;
+     }
+   } else {
+     alarmTriggered = false;
+   }
+ } else {
+   // never trigger while editing
+   alarmTriggered = false;
+ }
+
+ // — 3) one-button logic (short vs long press) —
+ bool curr = digitalRead(buttonPin);
+ if (lastState==HIGH && curr==LOW) {
+   pressTime = millis();
+ }
+ else if (lastState==LOW && curr==HIGH) {
+   releaseTime = millis();
+   unsigned long dur = releaseTime - pressTime;
+
+   if (setStage==0 && dur >= longPressThreshold) {
+     // enter hour-set
+     setStage = 1;
+   }
+   else if (setStage==1) {
+     if (dur < longPressThreshold) {
+       // short → +1 hour
+       alarmHour = (alarmHour + 1) % 24;
+     } else {
+       // long → minute-set
+       setStage = 2;
+     }
+   }
+   else if (setStage==2) {
+     if (dur < longPressThreshold) {
+       // short → +1 minute
+       alarmMinute = (alarmMinute + 1) % 60;
+     } else {
+       // long → back to view
+       setStage = 0;
+     }
+   }
+
+   updateDisplay();
+ }
+ lastState = curr;
+}
+
+void updateDisplay() {
+ lcd.clear();
+ lcd.setCursor(0,0);
+
+ if (setStage==0) {
+   // View mode: show alarm
+   lcd.print("Alarm: ");
+   if (alarmHour   < 10) lcd.print('0');
+   lcd.print(alarmHour);
+   lcd.print(':');
+   if (alarmMinute < 10) lcd.print('0');
+   lcd.print(alarmMinute);
+ }
+ else if (setStage==1) {
+   // Setting hour
+   lcd.print("Set Hr: ");
+   if (alarmHour < 10) lcd.print('0');
+   lcd.print(alarmHour);
+ }
+ else {
+   // Setting minute
+   lcd.print("Set Mn: ");
+   if (alarmMinute < 10) lcd.print('0');
+   lcd.print(alarmMinute);
+ }
+}
+
+void activateAlarm() {
+ lcd.clear();
+ lcd.setCursor(0,0);
+ lcd.print("  !!! ALARM !!!");
+
+ // flash buzzer + LEDs 10 times
+ for (int i = 0; i < 10; i++) {
+   // — buzzer beep —
+   tone(alarmPin, 650, 200);
+
+   // — LEDs: red or yellow —
+   CRGB color = (i % 2 == 0) ? CRGB::Red : CRGB::Yellow;
+   fill_solid(leds, NUM_LEDS, color);
+   FastLED.show();
+
+   delay(300);  // wait for tone + color
+ }
+
+ // turn everything off
+ noTone(alarmPin);
+ FastLED.clear();
+ FastLED.show();
+
+ updateDisplay();
+}
+
